@@ -66,7 +66,7 @@
         <UniformGrid Grid.Row="2"
                      Grid.Column="0"
                      Rows="2"
-                     Columns="3"
+                     Columns="4"
                      Margin="0,0,0,8">
             <Button x:Name="CheckButton"
                     Content="Check"
@@ -91,11 +91,17 @@
                     Margin="0,0,8,8"
                     IsEnabled="False"
                     Click="StartGatewayButton_Click" />
+            <Button x:Name="OnboardButton"
+                    Content="Onboard"
+                    MinWidth="120"
+                    Margin="0,0,8,8"
+                    IsEnabled="False"
+                    Click="OnboardButton_Click" />
             <Button x:Name="StopGatewayButton"
                     Content="Stop all OpenClaw"
                     MinWidth="120"
                     Margin="0,0,8,8"
-                    IsEnabled="False"
+                    IsEnabled="True"
                     Click="StopGatewayButton_Click" />
             <Button x:Name="HealthMonitorButton"
                     Content="Monitoring"
@@ -206,7 +212,7 @@
                            FontSize="16"
                            Margin="0,0,0,8" />
                 <TextBlock Grid.Row="1"
-                           Text="When a token is shown below, paste it into OpenClaw dashboard Control UI settings."
+                           Text="Run Onboard and use Get token to load gateway.auth.token from config, then copy it."
                            TextWrapping="Wrap"
                            Margin="0,0,0,8" />
                 <TextBox x:Name="GatewayTokenTextBox"
@@ -215,20 +221,30 @@
                          MinHeight="84"
                          Text="Waiting for token..."
                          TextWrapping="Wrap"
+                         FontFamily="Consolas"
                          VerticalScrollBarVisibility="Auto"
                          IsReadOnly="True"
                          IsUndoEnabled="False" />
-                <Button x:Name="CopyTokenButton"
-                        Grid.Row="3"
-                        Content="Copy token"
-                        Width="120"
-                        Height="30"
-                        HorizontalAlignment="Left"
-                        Margin="0,0,0,8"
-                        Click="CopyGatewayTokenButton_Click" />
+                <StackPanel Grid.Row="3"
+                            Orientation="Horizontal">
+                    <Button x:Name="CopyTokenButton"
+                            Content="Copy token"
+                            Width="120"
+                            Height="30"
+                            HorizontalAlignment="Left"
+                            Margin="0,0,8,8"
+                            Click="CopyGatewayTokenButton_Click" />
+                    <Button x:Name="GetTokenButton"
+                            Content="Get token"
+                            Width="120"
+                            Height="30"
+                            HorizontalAlignment="Left"
+                            Margin="0,0,0,8"
+                            Click="GetTokenButton_Click" />
+                </StackPanel>
                 <TextBlock Grid.Row="4"
                            x:Name="GatewayTokenStatus"
-                           Text="The token is displayed here automatically when detected."
+                           Text="Token will appear here after Onboard + Get token."
                            TextWrapping="Wrap" />
             </Grid>
         </Border>
