@@ -30,6 +30,8 @@ public partial class MainWindow : Window
     private bool _updatingDistroControls;
     private Process? _runningProcess;
     private bool _gatewayRunning;
+    private readonly object _gatewayMonitorLock = new();
+    private GatewayMonitorState? _gatewayMonitor;
     private bool _isMonitoring;
     private string? _gatewayToken;
     private int _gatewayPort = OpenClawDefaultPort;
@@ -43,18 +45,32 @@ public partial class MainWindow : Window
     private static readonly Regex GatewayTokenFromLabelRegex = new(
         @"(?i)\b(?:dashboard|control|access|auth)\s*token\b[^A-Za-z0-9]{0,20}([A-Za-z0-9._-]{20,})",
         RegexOptions.Compiled);
-    private static readonly Regex GatewayPortFromTextRegex = new(
-        @"(?i)(?:--port\s+(?<port>\d{1,5})|\bport[:=]\s*(?<port>\d{1,5})|:(?<port>\d{1,5}))",
+    private static readonly Regex GatewayAlreadyRunningOutputRegex = new(
+        @"(?i)\b(already\s+running|already\s+in\s+use|lock\s+timeout)\b",
+        RegexOptions.Compiled);
+    private static readonly Regex GatewayTokenMissingFromGatewayLogRegex = new(
+        @"(?i)disconnected\s*\(1008\)\s*:\s*unauthorized:\s*gateway\s+token\s+missing",
         RegexOptions.Compiled);
 
     public MainWindow()
     {
         InitializeComponent();
+        UpdateGatewayMonitorViews();
         UpdateInstallButtonState();
     }
 
     private string Distro => NormalizeCommandName(DistroTextBox.Text);
     private bool GatewayPortValid => TryParseGatewayPort(PortTextBox.Text, out _);
+    private GatewayMonitorState? GatewayMonitor
+    {
+        get
+        {
+            lock (_gatewayMonitorLock)
+            {
+                return _gatewayMonitor;
+            }
+        }
+    }
 
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
     {
@@ -135,6 +151,11 @@ public partial class MainWindow : Window
                 : $"Distro '{(string.IsNullOrWhiteSpace(selectedForValidation) ? "(not selected)" : selectedForValidation)}' not found. Select from the list.";
 
             AppendLog(finalStatus);
+
+            if (exists)
+            {
+                AppendLog("Check complete.");
+            }
         }
         catch (OperationCanceledException)
         {
@@ -246,8 +267,8 @@ public partial class MainWindow : Window
                 var gatewayStarted = await StartGatewayAsync(distro, defaultPort, cts.Token, verifyReachable: true);
                 if (gatewayStarted)
                 {
-                    AppendLog($"Gateway started on port {defaultPort}.");
-                    finalStatus += $" Gateway started on port {defaultPort}.";
+                    AppendLog($"Gateway started on port {_gatewayPort}.");
+                    finalStatus += $" Gateway started on port {_gatewayPort}.";
                     StartGatewayHealthMonitoring(cts.Token);
                 }
                 else
@@ -386,8 +407,8 @@ public partial class MainWindow : Window
             var started = await StartGatewayAsync(distro, port, cts.Token);
             if (started)
             {
-                SetStatus($"Gateway running on port {port}.");
-                AppendLog($"Gateway running on port {port}.");
+                SetStatus($"Gateway running on port {_gatewayPort}.");
+                AppendLog($"Gateway running on port {_gatewayPort}.");
                 StartGatewayHealthMonitoring(cts.Token);
             }
             else
@@ -415,41 +436,77 @@ public partial class MainWindow : Window
         }
 
         var distro = Distro;
-        var cts = BeginOperation("Stopping OpenClaw gateway.");
+        var cts = BeginOperation("Stopping all OpenClaw processes.");
 
         try
         {
-            await StopGatewayAsync(distro, cts.Token);
-            if (!_gatewayRunning)
-            {
-                SetStatus("Gateway stopped.");
-                AppendLog("Gateway stopped.");
-            }
-            else
-            {
-                SetStatus("Failed to stop gateway.");
-                AppendLog("Failed to stop gateway.");
-            }
+            var stopped = await StopGatewayAsync(distro, cts.Token);
+            SetStatus(stopped ? "All OpenClaw processes stopped." : "OpenClaw stop request sent.");
+            AppendLog(stopped ? "All OpenClaw processes stopped." : "OpenClaw stop command sent. Processes may still be shutting down.");
         }
         finally
         {
-            FinishOperation(_gatewayRunning ? "Gateway still running." : "Gateway stopped.", !_gatewayRunning);
+            var status = _gatewayRunning
+                ? "OpenClaw is still running."
+                : "All OpenClaw processes stopped.";
+            FinishOperation(status, !_gatewayRunning);
             _operationCancellation?.Dispose();
             _operationCancellation = null;
             cts.Dispose();
         }
     }
 
+    private void AddMonitorPortButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (!TryParseGatewayPort(MonitorPortTextBox.Text, out var port))
+        {
+            AppendLog("Invalid monitor port. Enter 1~65535.");
+            SetStatus("Invalid monitor port.");
+            return;
+        }
+
+        lock (_gatewayMonitorLock)
+        {
+            _gatewayMonitor = new GatewayMonitorState(
+                Port: port,
+                IsMonitoring: true,
+                IsHealthy: null,
+                LastChecked: null,
+                MonitorToken: null,
+                TokenRequired: false,
+                TokenStatusMessage: null,
+                HealthStatusMessage: null);
+        }
+
+        AppendLog($"Gateway monitor port set to {port}.");
+        SetStatus($"Monitor port set to {port}.");
+        UpdateGatewayMonitorViews();
+        _ = CheckGatewayHealthAndRefreshAsync();
+        StartGatewayHealthMonitoring(CancellationToken.None);
+    }
+
     private void HealthMonitorButton_Click(object sender, RoutedEventArgs e)
     {
-        if (!_gatewayRunning && !_isMonitoring)
+        if (GatewayMonitor is null)
         {
-            AppendLog("Gateway is not running. Start gateway first.");
+            AppendLog("No monitor port configured.");
+            SetStatus("Set a monitor port first.");
             return;
         }
 
         if (_isMonitoring)
         {
+            lock (_gatewayMonitorLock)
+            {
+                var monitor = _gatewayMonitor;
+                if (monitor is null)
+                {
+                    return;
+                }
+
+                _gatewayMonitor = monitor with { IsMonitoring = false };
+            }
+
             StopGatewayHealthMonitoring();
             SetStatus("Gateway health monitoring stopped.");
             AppendLog("Gateway health monitoring stopped.");
@@ -461,10 +518,50 @@ public partial class MainWindow : Window
             return;
         }
 
+        lock (_gatewayMonitorLock)
+        {
+            var monitor = _gatewayMonitor;
+            if (monitor is null)
+            {
+                return;
+            }
+
+            _gatewayMonitor = monitor with { IsMonitoring = true };
+        }
+
         var started = StartGatewayHealthMonitoring(CancellationToken.None);
         if (started)
         {
             AppendLog("Gateway health monitoring started.");
+        }
+    }
+
+    private void CopyGatewayTokenButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (string.IsNullOrWhiteSpace(_gatewayToken))
+        {
+            AppendLog("No gateway token detected yet.");
+            UpdateGatewayTokenDisplay(
+                GatewayTokenTextBox.Text,
+                "토큰이 아직 감지되지 않았습니다. 게이트웨이를 시작하거나 OpenClaw를 다시 실행해 보세요.");
+            SetStatus("No gateway token available.");
+            return;
+        }
+
+        try
+        {
+            Clipboard.SetText(_gatewayToken);
+            AppendLog("Dashboard token copied to clipboard.");
+            UpdateGatewayTokenDisplay(_gatewayToken, "클립보드에 복사되었습니다. OpenClaw dashboard의 Control UI 설정에 붙여 넣으세요.");
+            SetStatus("Gateway token copied.");
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"Failed to copy token: {ex.Message}");
+            UpdateGatewayTokenDisplay(
+                _gatewayToken,
+                $"클립보드 복사 실패: {ex.Message}");
+            SetStatus("Failed to copy token.");
         }
     }
 
@@ -498,6 +595,11 @@ public partial class MainWindow : Window
         if (HealthMonitorButton is not null)
         {
             HealthMonitorButton.IsEnabled = false;
+        }
+
+        if (AddMonitorPortButton is not null)
+        {
+            AddMonitorPortButton.IsEnabled = false;
         }
 
         if (InstallButton is not null)
@@ -559,8 +661,13 @@ public partial class MainWindow : Window
 
         if (HealthMonitorButton is not null)
         {
-            HealthMonitorButton.IsEnabled = !_isBusy && _gatewayRunning;
+            HealthMonitorButton.IsEnabled = !_isBusy && GatewayMonitor is not null;
             HealthMonitorButton.Content = _isMonitoring ? "Stop Monitoring" : "Start Monitoring";
+        }
+
+        if (AddMonitorPortButton is not null)
+        {
+            AddMonitorPortButton.IsEnabled = !_isBusy;
         }
     }
 
@@ -574,24 +681,8 @@ public partial class MainWindow : Window
         }
 
         _gatewayToken = null;
+        UpdateGatewayTokenDisplay("아직 토큰이 감지되지 않았습니다.", "게이트웨이를 시작하는 중입니다. 토큰 로그를 기다려주세요.");
         StopGatewayStream();
-
-        var existingPort = await DetectRunningGatewayPortAsync(normalizedDistro, token).ConfigureAwait(false);
-        if (existingPort.HasValue)
-        {
-            _gatewayPort = existingPort.Value;
-            SetGatewayPortForMonitoring(existingPort.Value);
-            _gatewayRunning = true;
-            AppendLog($"Existing OpenClaw gateway detected on port {existingPort.Value}. Monitoring existing instance.");
-            if (verifyReachable)
-            {
-                if (!await WaitForGatewayHealthyAsync(token).ConfigureAwait(false))
-                {
-                    AppendLog($"Existing gateway on port {existingPort.Value} is not reachable yet.");
-                }
-            }
-            return true;
-        }
 
         var startArgs = BuildGatewayStartArguments(normalizedDistro, port).ToArray();
         AppendLog($"Running: wsl.exe {FormatCommandForLog(startArgs)}");
@@ -599,12 +690,31 @@ public partial class MainWindow : Window
         var startGatewayTokenSource = CancellationTokenSource.CreateLinkedTokenSource(token);
         _gatewayCommandCancellation = startGatewayTokenSource;
         var startToken = startGatewayTokenSource.Token;
+        var startupOutput = new StringBuilder();
+        var startupError = new StringBuilder();
+        var startupOutputLock = new object();
+        void CaptureStartupOutput(string line, bool isError)
+        {
+            lock (startupOutputLock)
+            {
+                if (isError)
+                {
+                    startupError.AppendLine(line);
+                }
+                else
+                {
+                    startupOutput.AppendLine(line);
+                }
+            }
+
+            AppendGatewayOutput(line, isError);
+        }
 
         _gatewayCommandTask = RunWslCommandCapturedAsync(
             "wsl.exe",
             startArgs,
-            line => AppendGatewayOutput(line, isError: false),
-            line => AppendGatewayOutput(line, isError: true),
+            line => CaptureStartupOutput(line, isError: false),
+            line => CaptureStartupOutput(line, isError: true),
             startToken);
 
         try
@@ -636,14 +746,50 @@ public partial class MainWindow : Window
                     AppendLog($"Gateway start stderr: {NormalizeLogText(startResult.StandardError)}");
                 }
 
-                if (await TryAttachToRunningGatewayAsync(normalizedDistro, startToken).ConfigureAwait(false))
+                var alreadyRunning = IsGatewayAlreadyRunningMessage(startResult.StandardError)
+                    || IsGatewayAlreadyRunningMessage(startResult.StandardOutput);
+                if (alreadyRunning)
                 {
-                    return true;
+                    AppendLog($"요청 포트 {port}가 이미 사용 중입니다. 다른 포트를 선택해 다시 시작하세요.");
+                }
+                else
+                {
+                    AppendLog("Gateway failed to start. See logs for details.");
                 }
 
                 _gatewayRunning = false;
                 StopGatewayStream();
                 return false;
+            }
+        }
+        else
+        {
+            for (var attempt = 0; attempt < 12; attempt++)
+            {
+                string startupOutputSnapshot;
+                string startupErrorSnapshot;
+                lock (startupOutputLock)
+                {
+                    startupOutputSnapshot = startupOutput.ToString();
+                    startupErrorSnapshot = startupError.ToString();
+                }
+
+                if (IsGatewayAlreadyRunningMessage(startupErrorSnapshot)
+                    || IsGatewayAlreadyRunningMessage(startupOutputSnapshot))
+                {
+                    AppendLog($"요청 포트 {port}가 이미 사용 중입니다. 다른 포트를 선택해 다시 시작하세요.");
+
+                    _gatewayRunning = false;
+                    StopGatewayStream();
+                    return false;
+                }
+
+                if (_gatewayCommandTask.IsCompleted)
+                {
+                    break;
+                }
+
+                await Task.Delay(500, startToken).ConfigureAwait(false);
             }
         }
 
@@ -670,11 +816,11 @@ public partial class MainWindow : Window
             if (finalResult.Canceled || finalResult.ExitCode != 0)
             {
                 AppendLog($"Gateway command ended unexpectedly after startup (exit {finalResult.ExitCode}).");
-                if (await TryAttachToRunningGatewayAsync(normalizedDistro, startToken).ConfigureAwait(false))
+                if (IsGatewayAlreadyRunningMessage(finalResult.StandardError)
+                    || IsGatewayAlreadyRunningMessage(finalResult.StandardOutput))
                 {
-                    return true;
+                    AppendLog($"요청 포트 {port}가 이미 사용 중입니다. 다른 포트를 선택해 다시 시작하세요.");
                 }
-
                 _gatewayRunning = false;
                 StopGatewayStream();
                 return false;
@@ -684,80 +830,9 @@ public partial class MainWindow : Window
         return true;
     }
 
-    private async Task<bool> TryAttachToRunningGatewayAsync(string normalizedDistro, CancellationToken token)
+    private static bool IsGatewayAlreadyRunningMessage(string? text)
     {
-        var detectedPort = await DetectRunningGatewayPortAsync(normalizedDistro, token).ConfigureAwait(false);
-        if (!detectedPort.HasValue)
-        {
-            return false;
-        }
-
-        _gatewayPort = detectedPort.Value;
-        SetGatewayPortForMonitoring(detectedPort.Value);
-        AppendLog($"Existing OpenClaw gateway detected on port {detectedPort.Value}. Monitoring existing instance.");
-        _gatewayToken = null;
-        _gatewayRunning = true;
-        return true;
-    }
-
-    private static int? TryParseGatewayPortFromText(string? text)
-    {
-        if (string.IsNullOrWhiteSpace(text))
-        {
-            return null;
-        }
-
-        var matches = GatewayPortFromTextRegex.Matches(text);
-        foreach (Match portMatch in matches)
-        {
-            if (!portMatch.Success)
-            {
-                continue;
-            }
-
-            var portCandidate = ExtractCapturedPort(portMatch.Groups["port"].Value);
-            if (!portCandidate.HasValue)
-            {
-                continue;
-            }
-
-            if (portCandidate is < 1 or > 65535)
-            {
-                continue;
-            }
-
-            return portCandidate;
-        }
-
-        return null;
-    }
-
-    private static int? ExtractCapturedPort(string? value)
-    {
-        if (int.TryParse(value, out var parsed) && parsed is >= 1 and <= 65535)
-        {
-            return parsed;
-        }
-
-        return null;
-    }
-
-    private async Task<int?> DetectRunningGatewayPortAsync(string normalizedDistro, CancellationToken token)
-    {
-        var detectArgs = BuildGatewayPortProbeArguments(normalizedDistro).ToArray();
-        var detectResult = await RunWslCommandAsync("wsl.exe", detectArgs, token).ConfigureAwait(false);
-        if (detectResult.Canceled)
-        {
-            return null;
-        }
-
-        if (string.IsNullOrWhiteSpace(detectResult.StandardOutput))
-        {
-            return null;
-        }
-
-        return TryParseGatewayPortFromText(detectResult.StandardOutput)
-            ?? TryParseGatewayPortFromText(detectResult.StandardError);
+        return !string.IsNullOrWhiteSpace(text) && GatewayAlreadyRunningOutputRegex.IsMatch(text);
     }
 
     private void SetGatewayPortForMonitoring(int port)
@@ -798,18 +873,6 @@ public partial class MainWindow : Window
             {
                 AppendLog($"Gateway stop stderr: {NormalizeLogText(stopResult.StandardError)}");
             }
-        }
-
-        var stillRunning = await IsGatewayProcessRunningAsync(normalizedDistro, token).ConfigureAwait(false);
-        if (stillRunning)
-        {
-            AppendLog("Gateway is still running after stop request.");
-            return false;
-        }
-
-        if (statusExitCode != 0)
-        {
-            AppendLog("Gateway stop command returned non-zero exit code, but no running gateway process was detected.");
         }
 
         _gatewayRunning = false;
@@ -863,9 +926,17 @@ public partial class MainWindow : Window
 
     private void TryLogGatewayToken(string line)
     {
-        if (!string.IsNullOrWhiteSpace(_gatewayToken))
+        if (string.IsNullOrWhiteSpace(line))
         {
             return;
+        }
+
+        if (TryParseGatewayTokenMissingLine(line, out var tokenMissingMessage))
+        {
+            _gatewayToken = null;
+            UpdateGatewayMonitorStateForTokenStatus(tokenMissingMessage, tokenRequired: true);
+            UpdateGatewayTokenDisplay(string.Empty, "토큰이 없어 연결이 거부되었습니다. 대시보드에서 토큰을 가져와 붙여 넣으세요.");
+            AppendLog($"[gateway] {tokenMissingMessage}");
         }
 
         var token = ExtractGatewayToken(line);
@@ -875,7 +946,54 @@ public partial class MainWindow : Window
         }
 
         _gatewayToken = token;
-        AppendLog($"[gateway] Dashboard token. Copy this to Control UI settings: {token}");
+        UpdateGatewayMonitorStateForTokenStatus(token, tokenRequired: false);
+        UpdateGatewayTokenDisplay(token, "토큰이 감지되었습니다. Control UI settings에 붙여넣으세요.");
+        AppendLog($"[gateway] Dashboard token detected. Copy this to Control UI settings.");
+    }
+
+    private bool TryParseGatewayTokenMissingLine(string line, out string missingMessage)
+    {
+        missingMessage = string.Empty;
+        if (!GatewayTokenMissingFromGatewayLogRegex.IsMatch(line))
+        {
+            return false;
+        }
+
+        missingMessage = "disconnected (1008): unauthorized: gateway token missing (open the dashboard URL and paste the token in Control UI settings)";
+        return true;
+    }
+
+    private void UpdateGatewayMonitorStateForTokenStatus(string tokenMessage, bool tokenRequired)
+    {
+        lock (_gatewayMonitorLock)
+        {
+            if (_gatewayMonitor is null)
+            {
+                return;
+            }
+
+            _gatewayMonitor = _gatewayMonitor with
+            {
+                MonitorToken = tokenRequired ? null : tokenMessage,
+                TokenRequired = tokenRequired,
+                TokenStatusMessage = tokenRequired ? tokenMessage : null
+            };
+        }
+
+        UpdateGatewayMonitorViews();
+    }
+
+    private void UpdateGatewayTokenDisplay(string token, string statusMessage)
+    {
+        if (Dispatcher.CheckAccess())
+        {
+            GatewayTokenTextBox.Text = token;
+            GatewayTokenStatus.Text = statusMessage;
+            GatewayTokenTextBox.ToolTip = token;
+            return;
+        }
+
+        Dispatcher.BeginInvoke(() => UpdateGatewayTokenDisplay(token, statusMessage));
     }
 
     private static string? ExtractGatewayToken(string line)
@@ -900,28 +1018,6 @@ public partial class MainWindow : Window
         return null;
     }
 
-    private async Task<bool> IsGatewayProcessRunningAsync(string normalizedDistro, CancellationToken token)
-    {
-        var checkArgs = BuildGatewayProcessCheckArguments(normalizedDistro).ToArray();
-        var checkResult = await RunWslCommandAsync("wsl.exe", checkArgs, token);
-        if (checkResult.Canceled)
-        {
-            return false;
-        }
-
-        if (checkResult.ExitCode == 0)
-        {
-            return true;
-        }
-
-        if (!string.IsNullOrWhiteSpace(checkResult.StandardError))
-        {
-            AppendLog($"Gateway status check stderr: {NormalizeLogText(checkResult.StandardError)}");
-        }
-
-        return false;
-    }
-
     private bool StartGatewayHealthMonitoring(CancellationToken token)
     {
         if (_isMonitoring)
@@ -930,9 +1026,10 @@ public partial class MainWindow : Window
             return true;
         }
 
-        if (!_gatewayRunning)
+        var monitor = GatewayMonitor;
+        if (monitor is null || !monitor.IsMonitoring)
         {
-            AppendLog("Gateway is not running. Start gateway first.");
+            AppendLog("No active monitor port.");
             return false;
         }
 
@@ -941,6 +1038,7 @@ public partial class MainWindow : Window
         _healthMonitorCancellation = cancellation;
         _isMonitoring = true;
         UpdateInstallButtonState();
+        SetStatus("Gateway monitoring started.");
 
         _ = MonitorGatewayHealthLoopAsync(cancellation.Token);
         return true;
@@ -949,27 +1047,47 @@ public partial class MainWindow : Window
     private async Task MonitorGatewayHealthLoopAsync(CancellationToken token)
     {
         var previousState = (bool?)null;
+        var isFirstIteration = true;
 
         try
         {
             while (!token.IsCancellationRequested)
             {
-                var isHealthy = await CheckGatewayHealthAsync(token);
-                if (!previousState.HasValue || previousState.Value != isHealthy)
+                var monitor = GatewayMonitor;
+                if (monitor is null || !monitor.IsMonitoring)
                 {
-                    AppendLog(isHealthy
-                        ? $"Gateway health check: healthy on port {_gatewayPort}."
-                        : $"Gateway health check: unhealthy on port {_gatewayPort}.");
-                    previousState = isHealthy;
+                    break;
                 }
 
-                if (!isHealthy && _gatewayRunning)
+                var checkedAt = DateTime.UtcNow;
+                var healthy = await CheckGatewayHealthAsync(monitor.Port, token).ConfigureAwait(false);
+                UpdateGatewayMonitorState(healthy, checkedAt);
+                UpdateGatewayMonitorViews();
+
+                monitor = GatewayMonitor;
+                if (monitor is null)
                 {
-                    SetStatus($"Gateway unhealthy on port {_gatewayPort}.");
+                    break;
                 }
-                else if (isHealthy)
+
+                if (isFirstIteration || previousState != monitor.IsHealthy)
                 {
-                    SetStatus($"Gateway healthy on port {_gatewayPort}.");
+                    if (!isFirstIteration)
+                    {
+                        AppendLog(monitor.IsHealthy == true
+                            ? $"Gateway health check: healthy on port {monitor.Port}."
+                            : $"Gateway health check: unhealthy on port {monitor.Port}.");
+                    }
+
+                    previousState = monitor.IsHealthy;
+                }
+
+                SetStatus(BuildGatewayMonitorStatus(monitor));
+                isFirstIteration = false;
+
+                if (token.IsCancellationRequested)
+                {
+                    break;
                 }
 
                 await Task.Delay(GatewayHealthInterval, token).ConfigureAwait(false);
@@ -996,12 +1114,18 @@ public partial class MainWindow : Window
         }
 
         _healthMonitorCancellation?.Cancel();
+        _healthMonitorCancellation?.Dispose();
         _healthMonitorCancellation = null;
         _isMonitoring = false;
         UpdateInstallButtonState();
     }
 
-    private async Task<bool> CheckGatewayHealthAsync(CancellationToken token)
+    private Task<bool> CheckGatewayHealthAsync(CancellationToken token)
+    {
+        return CheckGatewayHealthAsync(_gatewayPort, token);
+    }
+
+    private async Task<bool> CheckGatewayHealthAsync(int port, CancellationToken token)
     {
         foreach (var path in GatewayHealthPaths)
         {
@@ -1011,7 +1135,7 @@ public partial class MainWindow : Window
             try
             {
                 using var response = await HealthClient.GetAsync(
-                    $"http://127.0.0.1:{_gatewayPort}{path}",
+                    $"http://127.0.0.1:{port}{path}",
                     pathTokenSource.Token).ConfigureAwait(false);
 
                 if (response.IsSuccessStatusCode || response.StatusCode == System.Net.HttpStatusCode.Moved
@@ -1037,11 +1161,16 @@ public partial class MainWindow : Window
         return false;
     }
 
-    private async Task<bool> WaitForGatewayHealthyAsync(CancellationToken token)
+    private Task<bool> WaitForGatewayHealthyAsync(CancellationToken token)
+    {
+        return WaitForGatewayHealthyAsync(_gatewayPort, token);
+    }
+
+    private async Task<bool> WaitForGatewayHealthyAsync(int port, CancellationToken token)
     {
         for (var attempt = 0; attempt < 12; attempt++)
         {
-            if (await CheckGatewayHealthAsync(token).ConfigureAwait(false))
+            if (await CheckGatewayHealthAsync(port, token).ConfigureAwait(false))
             {
                 return true;
             }
@@ -1050,6 +1179,169 @@ public partial class MainWindow : Window
         }
 
         return false;
+    }
+
+    private async Task CheckGatewayHealthAndRefreshAsync()
+    {
+        var monitor = GatewayMonitor;
+        if (monitor is null)
+        {
+            return;
+        }
+
+        var isHealthy = false;
+        try
+        {
+            isHealthy = await CheckGatewayHealthAsync(monitor.Port, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+
+        UpdateGatewayMonitorState(
+            isHealthy,
+            DateTime.UtcNow,
+            healthStatusMessage: null,
+            tokenRequired: monitor.TokenRequired);
+        UpdateGatewayMonitorViews();
+    }
+
+    private List<GatewayMonitorState> GetMonitorSnapshot()
+    {
+        lock (_gatewayMonitorLock)
+        {
+            var monitors = _gatewayMonitor is null ? [] : new List<GatewayMonitorState> { _gatewayMonitor };
+            return monitors;
+        }
+    }
+
+    private void UpdateGatewayMonitorState(
+        bool isHealthy,
+        DateTime checkedAt,
+        string? healthStatusMessage = null,
+        bool? tokenRequired = null)
+    {
+        lock (_gatewayMonitorLock)
+        {
+            if (_gatewayMonitor is null)
+            {
+                return;
+            }
+
+            _gatewayMonitor = _gatewayMonitor with
+            {
+                IsHealthy = isHealthy,
+                LastChecked = checkedAt,
+                HealthStatusMessage = healthStatusMessage,
+                TokenRequired = tokenRequired ?? _gatewayMonitor.TokenRequired
+            };
+        }
+    }
+
+    private void UpdateGatewayMonitorViews()
+    {
+        var snapshot = GetMonitorSnapshot();
+        if (Dispatcher.CheckAccess())
+        {
+            ApplyGatewayMonitorViews(snapshot);
+            return;
+        }
+
+        Dispatcher.BeginInvoke(() => ApplyGatewayMonitorViews(snapshot));
+    }
+
+    private void ApplyGatewayMonitorViews(IReadOnlyList<GatewayMonitorState> monitors)
+    {
+        if (GatewayMonitorSummary is null)
+        {
+            return;
+        }
+
+        if (monitors.Count == 0)
+        {
+            GatewayMonitorSummary.Text = "Monitor target not set.";
+            UpdateInstallButtonState();
+            return;
+        }
+
+        GatewayMonitorSummary.Text = BuildGatewayMonitorSummaryText(monitors);
+        UpdateInstallButtonState();
+    }
+
+    private static string BuildGatewayMonitorStatus(GatewayMonitorState? monitor)
+    {
+        if (monitor is null)
+        {
+            return "Monitor target not set.";
+        }
+
+        if (!monitor.IsMonitoring)
+        {
+            return $"Port {monitor.Port}: monitoring paused.";
+        }
+
+        if (monitor.TokenRequired)
+        {
+            return $"Port {monitor.Port}: token required - {monitor.TokenStatusMessage ?? "open dashboard and paste gateway token."}";
+        }
+
+        var state = monitor.IsHealthy switch
+        {
+            true => "reachable",
+            false => "unreachable",
+            _ => "checking"
+        };
+
+        var checkedAt = monitor.LastChecked?.ToLocalTime().ToString("HH:mm:ss") ?? "never";
+        return $"Port {monitor.Port}: {state}. Last check: {checkedAt}.";
+    }
+
+    private static string BuildGatewayMonitorSummaryText(IReadOnlyList<GatewayMonitorState> monitors)
+    {
+        if (monitors.Count == 0)
+        {
+            return "No monitor port configured.";
+        }
+
+        var monitor = monitors[0];
+        var monitoringState = monitor.IsMonitoring ? "running" : "paused";
+        var state = monitor.TokenRequired
+            ? "token required"
+            : monitor.IsHealthy switch
+            {
+                true => "reachable",
+                false => "unreachable",
+                _ => "checking"
+            };
+        var checkedAt = monitor.LastChecked?.ToLocalTime().ToString("HH:mm:ss") ?? "never";
+
+        var tokenDisplay = monitor.TokenRequired
+            ? "missing (1008)"
+            : string.IsNullOrWhiteSpace(monitor.MonitorToken)
+                ? "pending"
+                : "detected";
+
+        var statusDetail = monitor.HealthStatusMessage;
+        if (string.IsNullOrWhiteSpace(statusDetail))
+        {
+            statusDetail = monitor.TokenRequired ? null : monitor.IsHealthy switch
+            {
+                true => "reachable",
+                false => "not responding",
+                _ => "checking"
+            };
+        }
+
+        var detailedStatus = statusDetail is null
+            ? state
+            : $"{state} ({statusDetail})";
+
+        if (monitor.TokenRequired && !string.IsNullOrWhiteSpace(monitor.TokenStatusMessage))
+        {
+            return $"Port {monitor.Port} [{monitoringState}] | {detailedStatus}: {monitor.TokenStatusMessage} | token: {tokenDisplay} | last: {checkedAt}";
+        }
+
+        return $"Port {monitor.Port} [{monitoringState}] | {detailedStatus} | token: {tokenDisplay} | last: {checkedAt}";
     }
 
     private static bool TryParseGatewayPort(string? value, out int port)
@@ -1490,31 +1782,12 @@ public partial class MainWindow : Window
     private static IReadOnlyList<string> BuildGatewayStopArguments(string distro)
     {
         var normalizedDistro = NormalizeDistroValue(distro);
-        var stopCommand = "self=$$; "
-            + "pid=0; "
-            + "if [ -f /tmp/openclaw-gateway.pid ]; then "
-            + "read -r pid < /tmp/openclaw-gateway.pid; "
-            + "fi; "
-            + "if [ -n \"$pid\" ] && kill -0 \"$pid\" 2>/dev/null; then "
-            + "kill -15 \"$pid\" 2>/dev/null || true; "
+        var stopCommand = "openclaw gateway stop >/dev/null 2>&1 || true; "
+            + "pkill -TERM -x openclaw 2>/dev/null || true; "
+            + "pkill -TERM -x openclaw-gateway 2>/dev/null || true; "
             + "sleep 1; "
-            + "if kill -0 \"$pid\" 2>/dev/null; then "
-            + "kill -9 \"$pid\" 2>/dev/null || true; "
-            + "fi; "
-            + "fi; "
-            + "openclaw gateway stop >/dev/null 2>&1 || true; "
-            + "for p in $(pidof openclaw 2>/dev/null); do "
-            + "cmd=\"$(ps -p \"$p\" -o args= 2>/dev/null)\"; "
-            + "case \"$cmd\" in *\"openclaw gateway\"*|*\"openclaw-gateway\"*) "
-            + "if [ \"$p\" != \"$self\" ]; then "
-            + "kill -15 \"$p\" 2>/dev/null || true; "
-            + "sleep 0.5; "
-            + "if kill -0 \"$p\" 2>/dev/null; then "
-            + "kill -9 \"$p\" 2>/dev/null || true; "
-            + "fi; "
-            + "fi;; "
-            + "esac; "
-            + "done; "
+            + "pkill -KILL -x openclaw 2>/dev/null || true; "
+            + "pkill -KILL -x openclaw-gateway 2>/dev/null || true; "
             + "rm -f /tmp/openclaw-gateway.pid; "
             + "exit 0";
 
@@ -1528,53 +1801,6 @@ public partial class MainWindow : Window
             "bash",
             "-lc",
             stopCommand
-        };
-    }
-
-    private static IReadOnlyList<string> BuildGatewayPortProbeArguments(string distro)
-    {
-        var normalizedDistro = NormalizeDistroValue(distro);
-
-        return new[]
-        {
-            "-d",
-            normalizedDistro,
-            "-u",
-            "root",
-            "--",
-            "bash",
-            "-lc",
-            "for pid in $(pidof openclaw 2>/dev/null); do "
-            + "args=\"$(ps -p \"$pid\" -o args= 2>/dev/null)\"; "
-            + "case \"$args\" in *\"openclaw gateway\"*|*\"openclaw-gateway\"*) "
-            + "echo \"$pid $args\"; "
-            + ";; esac; "
-            + "done"
-        };
-    }
-
-    private static IReadOnlyList<string> BuildGatewayProcessCheckArguments(string distro)
-    {
-        var normalizedDistro = NormalizeDistroValue(distro);
-
-        return new[]
-        {
-            "-d",
-            normalizedDistro,
-            "-u",
-            "root",
-            "--",
-            "bash",
-            "-lc",
-            "if [ -f /tmp/openclaw-gateway.pid ]; then "
-            + "read -r pid < /tmp/openclaw-gateway.pid; "
-            + "if [ -n \"$pid\" ] && kill -0 \"$pid\" 2>/dev/null; then "
-            + "exit 0; fi; fi; "
-            + "for pid in $(pidof openclaw 2>/dev/null); do "
-            + "cmd=\"$(ps -p \"$pid\" -o args= 2>/dev/null)\"; "
-            + "case \"$cmd\" in *\"openclaw gateway\"*|*\"openclaw-gateway\"*) exit 0;; esac; "
-            + "done; "
-            + "exit 1"
         };
     }
 
@@ -1665,6 +1891,16 @@ public partial class MainWindow : Window
         {
         }
     }
+
+    private sealed record GatewayMonitorState(
+        int Port,
+        bool IsMonitoring,
+        bool? IsHealthy,
+        DateTime? LastChecked,
+        string? MonitorToken,
+        bool TokenRequired,
+        string? TokenStatusMessage,
+        string? HealthStatusMessage);
 
     private readonly record struct CommandResult(int ExitCode, string StandardOutput, string StandardError, bool Canceled);
 }
