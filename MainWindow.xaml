@@ -1,0 +1,144 @@
+﻿<Window x:Class="OpenClawWinManager.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:local="clr-namespace:OpenClawWinManager"
+        mc:Ignorable="d"
+        Title="OpenClawWinManager"
+        Height="520"
+        Width="820"
+        Loaded="MainWindow_Loaded">
+    <Grid Margin="12">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="Auto"/>
+            <ColumnDefinition Width="*"/>
+        </Grid.ColumnDefinitions>
+
+        <TextBlock Grid.Row="0"
+                   Grid.Column="0"
+                   Text="Distro"
+                   VerticalAlignment="Center"
+                   Margin="0,0,8,8" />
+        <TextBox x:Name="DistroTextBox"
+                 Grid.Row="0"
+                 Grid.Column="1"
+                 Margin="0,0,0,8"
+                 Height="28"
+                 VerticalContentAlignment="Center"
+                 Text="Ubuntu"
+                 TextChanged="DistroTextBox_TextChanged" />
+
+        <TextBlock Grid.Row="1"
+                   Grid.Column="0"
+                   Text="Gateway Port"
+                   VerticalAlignment="Center"
+                   Margin="0,0,8,8" />
+        <TextBox x:Name="PortTextBox"
+                 Grid.Row="1"
+                 Grid.Column="1"
+                 Margin="0,0,0,8"
+                 Width="180"
+                 Height="28"
+                 VerticalContentAlignment="Center"
+                 Text="18789"
+                 TextChanged="GatewayPortTextBox_TextChanged" />
+
+        <StackPanel Grid.Row="2"
+                    Grid.ColumnSpan="2"
+                    Orientation="Horizontal"
+                    Margin="0,0,0,8">
+            <Button x:Name="CheckButton"
+                    Content="Check"
+                    Width="120"
+                    Margin="0,0,8,0"
+                    Click="CheckButton_Click" />
+            <Button x:Name="InstallButton"
+                    Content="Install"
+                    Width="120"
+                    Margin="0,0,8,0"
+                    IsEnabled="False"
+                    Click="InstallButton_Click" />
+            <Button x:Name="CancelButton"
+                    Content="Cancel"
+                    Width="120"
+                    IsEnabled="False"
+                    Click="CancelButton_Click" />
+            <Button x:Name="StartGatewayButton"
+                    Content="Start Gateway"
+                    Width="120"
+                    Margin="8,0,8,0"
+                    IsEnabled="False"
+                    Click="StartGatewayButton_Click" />
+            <Button x:Name="StopGatewayButton"
+                    Content="Stop Gateway"
+                    Width="120"
+                    Margin="0,0,8,0"
+                    IsEnabled="False"
+                    Click="StopGatewayButton_Click" />
+            <Button x:Name="HealthMonitorButton"
+                    Content="Start Monitoring"
+                    Width="140"
+                    IsEnabled="False"
+                    Click="HealthMonitorButton_Click" />
+        </StackPanel>
+
+        <StackPanel Grid.Row="3"
+                    Grid.ColumnSpan="2"
+                    Orientation="Horizontal"
+                    Margin="0,0,0,8">
+            <TextBlock Text="Status:" VerticalAlignment="Center" />
+            <TextBlock x:Name="StatusLabel"
+                       Text="Idle"
+                       Margin="8,0,0,0"
+                       VerticalAlignment="Center" />
+        </StackPanel>
+
+        <ProgressBar x:Name="InstallProgressBar"
+                     Grid.Row="4"
+                     Grid.ColumnSpan="2"
+                     Height="18"
+                     Minimum="0"
+                     Maximum="100"
+                     Margin="0,0,0,8"
+                     IsIndeterminate="False" />
+
+        <TextBlock Grid.Row="5"
+                   Grid.ColumnSpan="2"
+                   Text="WSL distros"
+                   FontWeight="SemiBold"
+                   Margin="0,0,0,4" />
+        <ListBox x:Name="DistroListBox"
+                 Grid.Row="5"
+                 Grid.ColumnSpan="2"
+                 Height="126"
+                 Margin="0,22,0,8"
+                 SelectionChanged="DistroListBox_SelectionChanged" />
+
+        <TextBlock Grid.Row="6"
+                   Grid.ColumnSpan="2"
+                   Text="Logs"
+                   FontWeight="SemiBold"
+                   Margin="0,0,0,4" />
+        <TextBox x:Name="LogsTextBox"
+                 Grid.Row="6"
+                 Grid.ColumnSpan="2"
+                 Margin="0,22,0,0"
+                 AcceptsReturn="True"
+                 AcceptsTab="False"
+                 VerticalScrollBarVisibility="Auto"
+                 HorizontalScrollBarVisibility="Auto"
+                 TextWrapping="NoWrap"
+                 IsReadOnly="True"
+                 IsUndoEnabled="False" />
+    </Grid>
+</Window>
