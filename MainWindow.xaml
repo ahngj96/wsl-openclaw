@@ -116,16 +116,40 @@
                     Orientation="Vertical"
                     Margin="0,0,0,8">
             <StackPanel Orientation="Horizontal">
+                <TextBlock x:Name="StatusIcon"
+                           Text="..."
+                           FontSize="16"
+                           Margin="0,0,6,0"
+                           VerticalAlignment="Center"
+                           Foreground="Gray" />
                 <TextBlock Text="Status:" VerticalAlignment="Center" />
                 <TextBlock x:Name="StatusLabel"
                            Text="Idle"
                            Margin="8,0,0,0"
                            VerticalAlignment="Center" />
             </StackPanel>
-            <TextBlock x:Name="GatewayMonitorSummary"
-                       Text="No monitor target yet."
-                       Margin="0,4,0,0"
-                       TextWrapping="Wrap" />
+            <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
+                <TextBlock x:Name="MonitorIcon"
+                           Text="..."
+                           FontSize="14"
+                           Margin="0,0,6,0"
+                           VerticalAlignment="Center"
+                           Foreground="Gray" />
+                <TextBlock x:Name="GatewayMonitorSummary"
+                           Text="No monitor target yet."
+                           TextWrapping="Wrap" />
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
+                <TextBlock x:Name="TokenIcon"
+                           Text="..."
+                           FontSize="14"
+                           Margin="0,0,6,0"
+                           VerticalAlignment="Center"
+                           Foreground="Gray" />
+                <TextBlock x:Name="GatewayTokenSummary"
+                           Text="Token status unknown."
+                           TextWrapping="Wrap" />
+            </StackPanel>
             <Grid Margin="0,8,0,0">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="120"/>
@@ -250,3 +274,5 @@
         </Border>
     </Grid>
 </Window>
+
+

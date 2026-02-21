@@ -5,6 +5,7 @@ using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using System.Windows.Media;
 using System.Windows;
 using System.Windows.Controls;
 
@@ -15,8 +16,6 @@ namespace OpenClawWinManager;
 /// </summary>
 public partial class MainWindow : Window
 {
-    private const string InstallerCommand =
-        "curl -fsSL https://openclaw.ai/install.sh -o /tmp/openclaw-install.sh; chmod +x /tmp/openclaw-install.sh; bash /tmp/openclaw-install.sh --no-onboard --no-prompt --no-gum";
     private const int OpenClawDefaultPort = 18789;
     private const string SettingsFileName = "settings.json";
     private static readonly TimeSpan GatewayHealthTimeout = TimeSpan.FromSeconds(2);
@@ -363,7 +362,7 @@ public partial class MainWindow : Window
 
         try
         {
-            var installArgs = BuildInstallArguments(distro).ToArray();
+            var installArgs = OpenClawWslCommandBuilder.BuildInstallArguments(distro).ToArray();
             AppendLog("Running install as root to avoid sudo prompts.");
             AppendLog($"Running: wsl.exe {FormatCommandForLog(installArgs)}");
             SetProgress(0, indeterminate: true);
@@ -386,7 +385,7 @@ public partial class MainWindow : Window
             SetStatus("Verifying OpenClaw installation.");
             var verifyResult = await RunWslCommandAsync(
                 "wsl.exe",
-                BuildVerifyArguments(distro).ToArray(),
+                OpenClawWslCommandBuilder.BuildVerifyArguments(distro).ToArray(),
                 cts.Token);
 
             if (verifyResult.Canceled)
@@ -618,7 +617,7 @@ public partial class MainWindow : Window
 
         try
         {
-            var terminalCommand = BuildOpenClawOnboardCommand(normalizedDistro);
+            var terminalCommand = OpenClawWslCommandBuilder.BuildOpenClawOnboardCommand(normalizedDistro);
             AppendLog($"Opening OpenClaw onboard terminal for '{normalizedDistro}'.");
             AppendLog($"Running: {terminalCommand}");
 
@@ -1001,7 +1000,7 @@ public partial class MainWindow : Window
             return null;
         }
 
-        var configArgs = BuildGatewayTokenConfigArguments(normalizedDistro).ToArray();
+        var configArgs = OpenClawWslCommandBuilder.BuildGatewayTokenConfigArguments(normalizedDistro).ToArray();
         AppendLog($"Running: wsl.exe {FormatCommandForLog(configArgs)}");
 
         var result = await RunWslCommandAsync("wsl.exe", configArgs, ct).ConfigureAwait(false);
@@ -1251,7 +1250,7 @@ public partial class MainWindow : Window
             AppendGatewayOutput(line, isError);
         }
 
-        var startArgs = BuildGatewayStartArguments(normalizedDistro, port).ToArray();
+        var startArgs = OpenClawWslCommandBuilder.BuildGatewayStartArguments(normalizedDistro, port).ToArray();
         AppendLog($"Running: wsl.exe {FormatCommandForLog(startArgs)}");
 
         _gatewayCommandTask = RunWslCommandCapturedAsync(
@@ -1455,7 +1454,7 @@ public partial class MainWindow : Window
 
         await StopGatewayStreamAsync(token);
         StopGatewayHealthMonitoring();
-        var stopArgs = BuildGatewayStopArguments(normalizedDistro).ToArray();
+        var stopArgs = OpenClawWslCommandBuilder.BuildGatewayStopArguments(normalizedDistro).ToArray();
         AppendLog($"Running: wsl.exe {FormatCommandForLog(stopArgs)}");
         var stopResult = await RunWslCommandAsync("wsl.exe", stopArgs, token);
         if (stopResult.Canceled)
@@ -1591,6 +1590,19 @@ public partial class MainWindow : Window
         {
             GatewayTokenTextBox.Text = token;
             GatewayTokenStatus.Text = statusMessage;
+            GatewayTokenStatus.Foreground = GatewayStatusColor.GetTokenStatusBrush(statusMessage);
+            if (TokenIcon is not null)
+            {
+                TokenIcon.Text = GatewayStatusColor.GetTokenStatusIcon(statusMessage);
+                TokenIcon.Foreground = GatewayStatusColor.GetTokenStatusBrush(statusMessage);
+            }
+
+            if (GatewayTokenSummary is not null)
+            {
+                GatewayTokenSummary.Text = statusMessage;
+                GatewayTokenSummary.Foreground = GatewayStatusColor.GetTokenStatusBrush(statusMessage);
+            }
+
             GatewayTokenTextBox.ToolTip = token;
             return;
         }
@@ -1918,11 +1930,38 @@ public partial class MainWindow : Window
         if (monitors.Count == 0)
         {
             GatewayMonitorSummary.Text = "Monitor target not set.";
+            GatewayMonitorSummary.Foreground = GatewayStatusColor.GetMonitorSummaryBrush(null);
+            if (MonitorIcon is not null)
+            {
+                MonitorIcon.Text = GatewayStatusColor.GetMonitorIcon(null);
+                MonitorIcon.Foreground = GatewayStatusColor.GetMonitorSummaryBrush(null);
+            }
+
+            if (GatewayTokenSummary is not null)
+            {
+                GatewayTokenSummary.Text = "Token status unknown.";
+                GatewayTokenSummary.Foreground = GatewayStatusColor.GetTokenStatusBrush("Token status unknown.");
+            }
+
             UpdateInstallButtonState();
             return;
         }
 
         GatewayMonitorSummary.Text = BuildGatewayMonitorSummaryText(monitors);
+        GatewayMonitorSummary.Foreground = GatewayStatusColor.GetMonitorSummaryBrush(monitors[0]);
+        if (MonitorIcon is not null)
+        {
+            MonitorIcon.Text = GatewayStatusColor.GetMonitorIcon(monitors[0]);
+            MonitorIcon.Foreground = GatewayStatusColor.GetMonitorSummaryBrush(monitors[0]);
+        }
+
+        if (GatewayTokenSummary is not null)
+        {
+            GatewayTokenSummary.Text = monitors[0].TokenRequired ? "Token required." : "Token detected.";
+            GatewayTokenSummary.Foreground = GatewayStatusColor.GetTokenStatusBrush(
+                monitors[0].TokenRequired ? "token required" : "token detected");
+        }
+
         UpdateInstallButtonState();
     }
 
@@ -2022,10 +2061,16 @@ public partial class MainWindow : Window
         if (Dispatcher.CheckAccess())
         {
             StatusLabel.Text = status;
+            StatusLabel.Foreground = GatewayStatusColor.GetStatusBrush(status);
+            if (StatusIcon is not null)
+            {
+                StatusIcon.Text = GatewayStatusColor.GetStatusIcon(status);
+                StatusIcon.Foreground = GatewayStatusColor.GetStatusBrush(status);
+            }
             return;
         }
 
-        Dispatcher.BeginInvoke(() => StatusLabel.Text = status);
+        Dispatcher.BeginInvoke(() => SetStatus(status));
     }
 
     private void SetProgress(int value, bool indeterminate)
@@ -2384,125 +2429,6 @@ public partial class MainWindow : Window
         return sanitized.Replace("\r", "\\r").Replace("\n", "\\n");
     }
 
-    private static string BashSingleQuoted(string value)
-    {
-        return "'" + value.Replace("'", "'\"'\"'") + "'";
-    }
-
-    private static string QuoteWindowsArgument(string value)
-    {
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            return "\"\"";
-        }
-
-        return "\"" + value.Replace("\"", "\\\"") + "\"";
-    }
-
-    private static IReadOnlyList<string> BuildInstallArguments(string distro)
-    {
-        var normalizedDistro = NormalizeDistroValue(distro);
-
-        return new[]
-        {
-            "-d",
-            normalizedDistro,
-            "-u",
-            "root",
-            "--",
-            "bash",
-            "-lc",
-            InstallerCommand
-        };
-    }
-
-    private static IReadOnlyList<string> BuildVerifyArguments(string distro)
-    {
-        var normalizedDistro = NormalizeDistroValue(distro);
-
-        return new[]
-        {
-            "-d",
-            normalizedDistro,
-            "-u",
-            "root",
-            "--",
-            "bash",
-            "-lc",
-            "command -v openclaw && openclaw --version"
-        };
-    }
-
-    private static IReadOnlyList<string> BuildGatewayStartArguments(string distro, int port)
-    {
-        var normalizedDistro = NormalizeDistroValue(distro);
-        var gatewayCommand = $"command -v openclaw >/dev/null || exit 1; "
-            + "(command -v stdbuf >/dev/null 2>&1 && stdbuf -oL -eL openclaw gateway --allow-unconfigured --port "
-            + $"{port} || openclaw gateway --allow-unconfigured --port {port})";
-
-        return new[]
-        {
-            "-d",
-            normalizedDistro,
-            "--",
-            "bash",
-            "-lc",
-            gatewayCommand
-        };
-    }
-
-    private static IReadOnlyList<string> BuildGatewayTokenConfigArguments(string distro)
-    {
-        var normalizedDistro = NormalizeDistroValue(distro);
-        return new[]
-        {
-            "-d",
-            normalizedDistro,
-            "--",
-            "bash",
-            "-lc",
-            "openclaw config get gateway.auth.token"
-        };
-    }
-
-    private static string BuildOpenClawOnboardCommand(string distro)
-    {
-        var normalizedDistro = NormalizeDistroValue(distro);
-        var wslDistroArg = PowerShellSingleQuoted(normalizedDistro);
-        return $"& wsl.exe -d {wslDistroArg} -- bash -lc {BashSingleQuoted("openclaw onboard")}";
-    }
-
-    private static string PowerShellSingleQuoted(string value)
-    {
-        return $"'{value.Replace("'", "''")}'";
-    }
-
-    private static IReadOnlyList<string> BuildGatewayStopArguments(string distro)
-    {
-        var normalizedDistro = NormalizeDistroValue(distro);
-        var stopCommand = "openclaw gateway stop >/dev/null 2>&1 || true; "
-            + "if command -v systemctl >/dev/null 2>&1; then systemctl --user stop openclaw-gateway.service >/dev/null 2>&1 || true; fi; "
-            + "pkill -TERM -f \"openclaw-gateway\" 2>/dev/null || true; "
-            + "pkill -TERM -f \"openclaw gateway\" 2>/dev/null || true; "
-            + "pkill -TERM -f \"openclaw\" 2>/dev/null || true; "
-            + "sleep 1; "
-            + "pkill -KILL -f \"openclaw-gateway\" 2>/dev/null || true; "
-            + "pkill -KILL -f \"openclaw gateway\" 2>/dev/null || true; "
-            + "pkill -KILL -f \"openclaw\" 2>/dev/null || true; "
-            + "rm -f /tmp/openclaw-gateway.pid; "
-            + "exit 0";
-
-        return new[]
-        {
-            "-d",
-            normalizedDistro,
-            "--",
-            "bash",
-            "-lc",
-            stopCommand
-        };
-    }
-
     private static string FormatCommandForLog(IReadOnlyList<string> args)
     {
         return string.Join(
@@ -2598,16 +2524,6 @@ public partial class MainWindow : Window
         public int? MonitorPort { get; set; }
         public string? GatewayToken { get; set; }
     }
-
-    private sealed record GatewayMonitorState(
-        int Port,
-        bool IsMonitoring,
-        bool? IsHealthy,
-        DateTime? LastChecked,
-        string? MonitorToken,
-        bool TokenRequired,
-        string? TokenStatusMessage,
-        string? HealthStatusMessage);
 
     private readonly record struct CommandResult(int ExitCode, string StandardOutput, string StandardError, bool Canceled);
 }
