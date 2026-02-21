@@ -5,6 +5,7 @@ namespace OpenClawWinManager;
 
 internal static class OpenClawWslCommandBuilder
 {
+    private const string InstallerUser = "root";
     private const string InstallerCommand =
         "curl -fsSL https://openclaw.ai/install.sh -o /tmp/openclaw-install.sh; chmod +x /tmp/openclaw-install.sh; bash /tmp/openclaw-install.sh --no-onboard --no-prompt --no-gum";
 
@@ -15,7 +16,7 @@ internal static class OpenClawWslCommandBuilder
             "-d",
             normalizedDistro,
             "-u",
-            "root",
+            InstallerUser,
             "--",
             "bash",
             "-lc",
@@ -23,20 +24,35 @@ internal static class OpenClawWslCommandBuilder
         };
     }
 
-    public static IReadOnlyList<string> BuildVerifyArguments(string normalizedDistro)
+    public static IReadOnlyList<string> BuildVerifyArgumentsAsRoot(string normalizedDistro)
     {
         return new[]
         {
             "-d",
             normalizedDistro,
             "-u",
-            "root",
+            InstallerUser,
             "--",
             "bash",
             "-lc",
             "command -v openclaw && openclaw --version"
         };
     }
+
+    public static IReadOnlyList<string> BuildVerifyArgumentsAsUser(string normalizedDistro)
+    {
+        return new[]
+        {
+            "-d",
+            normalizedDistro,
+            "--",
+            "bash",
+            "-lc",
+            "command -v openclaw && openclaw --version"
+        };
+    }
+
+    public static IReadOnlyList<string> BuildVerifyArguments(string normalizedDistro) => BuildVerifyArgumentsAsRoot(normalizedDistro);
 
     public static IReadOnlyList<string> BuildGatewayStartArguments(string normalizedDistro, int port)
     {
@@ -71,6 +87,7 @@ internal static class OpenClawWslCommandBuilder
     public static string BuildOpenClawOnboardCommand(string normalizedDistro)
     {
         var wslDistroArg = PowerShellSingleQuoted(normalizedDistro);
+        // Run onboard as distro default user (non-root) so it uses user-level auth/session context.
         return $"& wsl.exe -d {wslDistroArg} -- bash -lc {BashSingleQuoted("openclaw onboard")}";
     }
 

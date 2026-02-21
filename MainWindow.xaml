@@ -73,12 +73,6 @@
                     MinWidth="120"
                     Margin="0,0,8,8"
                     Click="CheckButton_Click" />
-            <Button x:Name="InstallButton"
-                    Content="Install"
-                    MinWidth="120"
-                    Margin="0,0,8,8"
-                    IsEnabled="False"
-                    Click="InstallButton_Click" />
             <Button x:Name="CancelButton"
                     Content="Cancel"
                     MinWidth="120"
@@ -92,7 +86,7 @@
                     IsEnabled="False"
                     Click="StartGatewayButton_Click" />
             <Button x:Name="OnboardButton"
-                    Content="Onboard"
+                    Content="Install then Onboard"
                     MinWidth="120"
                     Margin="0,0,8,8"
                     IsEnabled="False"

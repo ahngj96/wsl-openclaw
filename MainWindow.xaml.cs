@@ -17,6 +17,8 @@ namespace OpenClawWinManager;
 public partial class MainWindow : Window
 {
     private const int OpenClawDefaultPort = 18789;
+    private const string RootCommandContext = "root";
+    private const string UserCommandContext = "user";
     private const string SettingsFileName = "settings.json";
     private static readonly TimeSpan GatewayHealthTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan GatewayHealthInterval = TimeSpan.FromSeconds(5);
@@ -321,127 +323,67 @@ public partial class MainWindow : Window
         }
     }
 
-    private async void InstallButton_Click(object sender, RoutedEventArgs e)
+    private async Task<bool> EnsureOpenClawInstalledAsync(string distro, CancellationToken token)
     {
-        if (_isBusy)
+        var verifyArgs = OpenClawWslCommandBuilder.BuildVerifyArgumentsAsRoot(distro).ToArray();
+        AppendLog("Checking if OpenClaw is already installed.");
+        AppendWslCommandLog(RootCommandContext, verifyArgs);
+        var verifyResult = await RunWslCommandAsync("wsl.exe", verifyArgs, token);
+        if (token.IsCancellationRequested)
         {
-            return;
+            return false;
         }
 
-        if (!_distroExists)
+        if (verifyResult.ExitCode == 0
+            && VerifyVersion(verifyResult, out var existingVersion, out _))
         {
-            AppendLog("Run Check first to confirm the distro exists.");
-            SetStatus("Distro has not been checked.");
-            return;
+            AppendLog($"OpenClaw already installed: {existingVersion}.");
+            return true;
         }
 
-        var distro = NormalizeCommandName(DistroTextBox.Text);
-        if (string.IsNullOrWhiteSpace(distro))
+        AppendLog("OpenClaw not detected. Running install.");
+        AppendLog("Running install as root to avoid sudo prompts.");
+
+        var installArgs = OpenClawWslCommandBuilder.BuildInstallArguments(distro).ToArray();
+        AppendWslCommandLog(RootCommandContext, installArgs);
+        SetProgress(20, indeterminate: true);
+
+        var installResult = await RunWslCommandAsync("wsl.exe", installArgs, token);
+        if (installResult.Canceled)
         {
-            AppendLog("Distro is required.");
-            SetStatus("Distro required.");
-            return;
+            AppendLog("Install canceled.");
+            return false;
         }
 
-        if (!string.Equals(distro, DistroTextBox.Text, StringComparison.Ordinal))
+        if (installResult.ExitCode != 0)
         {
-            _updatingDistroControls = true;
-            try
+            AppendLog($"Install script exited with code {installResult.ExitCode}.");
+            if (!string.IsNullOrWhiteSpace(installResult.StandardError))
             {
-                DistroTextBox.Text = distro;
+                AppendLog($"Install stderr: {NormalizeLogText(installResult.StandardError)}");
             }
-            finally
-            {
-                _updatingDistroControls = false;
-            }
+
+            return false;
         }
 
-        var cts = BeginOperation($"Installing OpenClaw into '{distro}'");
-        string finalStatus = "Install complete.";
-        bool progressSuccess = false;
-
-        try
+        SetProgress(60, indeterminate: true);
+        AppendLog("Verifying OpenClaw installation after install.");
+        AppendWslCommandLog(RootCommandContext, verifyArgs);
+        verifyResult = await RunWslCommandAsync("wsl.exe", verifyArgs, token);
+        if (verifyResult.Canceled)
         {
-            var installArgs = OpenClawWslCommandBuilder.BuildInstallArguments(distro).ToArray();
-            AppendLog("Running install as root to avoid sudo prompts.");
-            AppendLog($"Running: wsl.exe {FormatCommandForLog(installArgs)}");
-            SetProgress(0, indeterminate: true);
-
-            var installResult = await RunWslCommandAsync("wsl.exe", installArgs, cts.Token);
-            if (installResult.Canceled)
-            {
-                finalStatus = "Install canceled.";
-                return;
-            }
-
-            if (installResult.ExitCode != 0)
-            {
-                AppendLog($"Install script exited with code {installResult.ExitCode}.");
-                finalStatus = "Install failed.";
-                return;
-            }
-
-            SetProgress(70, indeterminate: true);
-            SetStatus("Verifying OpenClaw installation.");
-            var verifyResult = await RunWslCommandAsync(
-                "wsl.exe",
-                OpenClawWslCommandBuilder.BuildVerifyArguments(distro).ToArray(),
-                cts.Token);
-
-            if (verifyResult.Canceled)
-            {
-                finalStatus = "Verification canceled.";
-                return;
-            }
-
-            if (!VerifyVersion(verifyResult, out var version, out var verificationMessage))
-            {
-                AppendLog(verificationMessage);
-                finalStatus = verificationMessage;
-                return;
-            }
-
-            AppendLog($"openclaw --version: {version}");
-            finalStatus = $"Installation complete. {version}.";
-            progressSuccess = true;
-            SetProgress(100, indeterminate: false);
-
-            if (TryParseGatewayPort(PortTextBox.Text, out var defaultPort))
-            {
-                var gatewayStarted = await StartGatewayAsync(distro, defaultPort, cts.Token, verifyReachable: true);
-                if (gatewayStarted)
-                {
-                    AppendLog($"Gateway started on port {_gatewayPort}.");
-                    finalStatus += $" Gateway started on port {_gatewayPort}.";
-                }
-                else
-                {
-                    AppendLog("Install complete, but gateway start/health-check failed. You can start it manually.");
-                    finalStatus += " Gateway is not running.";
-                }
-            }
-            else
-            {
-                AppendLog("Invalid gateway port in UI. Gateway auto-start skipped.");
-                finalStatus += " Gateway auto-start skipped (invalid port).";
-            }
+            AppendLog("Verification canceled.");
+            return false;
         }
-        catch (OperationCanceledException)
+
+        if (!VerifyVersion(verifyResult, out var version, out var verificationMessage))
         {
-            finalStatus = "Install canceled.";
+            AppendLog(verificationMessage);
+            return false;
         }
-        catch (Exception ex)
-        {
-            AppendLog($"Install failed: {ex.Message}");
-            finalStatus = "Install failed.";
-        }
-        finally
-        {
-            FinishOperation(finalStatus, progressSuccess);
-            _operationCancellation?.Dispose();
-            _operationCancellation = null;
-            cts.Dispose();
-        }
+
+        AppendLog($"OpenClaw installed: {version}");
+        return true;
     }
 
     private void CancelButton_Click(object sender, RoutedEventArgs e)
@@ -592,7 +534,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private void OnboardButton_Click(object sender, RoutedEventArgs e)
+    private async void OnboardButton_Click(object sender, RoutedEventArgs e)
     {
         if (_isBusy)
         {
@@ -615,11 +557,21 @@ public partial class MainWindow : Window
             return;
         }
 
+        var cts = BeginOperation($"Preparing OpenClaw onboarding for '{normalizedDistro}'");
+        var finalStatus = "Onboard failed.";
+        var opened = false;
+
         try
         {
+            if (!await EnsureOpenClawInstalledAsync(normalizedDistro, cts.Token).ConfigureAwait(true))
+            {
+                finalStatus = "Install step failed. Cannot start onboard.";
+                return;
+            }
+
             var terminalCommand = OpenClawWslCommandBuilder.BuildOpenClawOnboardCommand(normalizedDistro);
-            AppendLog($"Opening OpenClaw onboard terminal for '{normalizedDistro}'.");
-            AppendLog($"Running: {terminalCommand}");
+            AppendLog($"[{UserCommandContext}] Opening OpenClaw onboard terminal for '{normalizedDistro}'.");
+            AppendLog($"[{UserCommandContext}] Running: {terminalCommand}");
 
             var process = new Process
             {
@@ -631,18 +583,34 @@ public partial class MainWindow : Window
                     CreateNoWindow = false
                 }
             };
+
             process.Start();
             SetStatus("OpenClaw onboard terminal opened.");
             AppendLog("Complete onboarding in the terminal. Token will be read from config after the command exits.");
             UpdateGatewayTokenDisplay(
                 GatewayTokenTextBox.Text,
                 "온보드 완료 후 토큰을 자동 조회합니다...");
+            opened = true;
+            finalStatus = "Onboard terminal opened.";
             _ = MonitorOnboardCompletionAsync(process, normalizedDistro);
+        }
+        catch (OperationCanceledException)
+        {
+            finalStatus = "Onboard canceled.";
+            SetStatus(finalStatus);
         }
         catch (Exception ex)
         {
+            finalStatus = "Failed to open onboard terminal.";
             AppendLog($"Failed to open onboard terminal: {ex.Message}");
-            SetStatus("Failed to open onboard terminal.");
+            SetStatus(finalStatus);
+        }
+        finally
+        {
+            FinishOperation(finalStatus, opened);
+            _operationCancellation?.Dispose();
+            _operationCancellation = null;
+            cts.Dispose();
         }
     }
 
@@ -979,7 +947,7 @@ public partial class MainWindow : Window
             UpdateGatewayTokenDisplay(
                 token,
                 "온보드에서 발급된 토큰을 config에서 읽어왔습니다. Control UI settings에 붙여 넣으세요.");
-            AppendLog("Gateway token loaded from openclaw config.");
+            AppendLog($"[{UserCommandContext}] Gateway token loaded from openclaw config.");
             SaveSettings();
             SetStatus("Gateway token loaded.");
         }
@@ -1001,7 +969,7 @@ public partial class MainWindow : Window
         }
 
         var configArgs = OpenClawWslCommandBuilder.BuildGatewayTokenConfigArguments(normalizedDistro).ToArray();
-        AppendLog($"Running: wsl.exe {FormatCommandForLog(configArgs)}");
+        AppendWslCommandLog(UserCommandContext, configArgs);
 
         var result = await RunWslCommandAsync("wsl.exe", configArgs, ct).ConfigureAwait(false);
         if (result.Canceled)
@@ -1066,11 +1034,6 @@ public partial class MainWindow : Window
             AddMonitorPortButton.IsEnabled = false;
         }
 
-        if (InstallButton is not null)
-        {
-            InstallButton.IsEnabled = false;
-        }
-
         if (CancelButton is not null)
         {
             CancelButton.IsEnabled = true;
@@ -1103,12 +1066,6 @@ public partial class MainWindow : Window
 
     private void UpdateInstallButtonState()
     {
-        if (InstallButton is null)
-        {
-            return;
-        }
-
-        InstallButton.IsEnabled = !_isBusy && _distroExists && !string.IsNullOrWhiteSpace(Distro);
         if (StartGatewayButton is not null)
         {
             StartGatewayButton.IsEnabled = !_isBusy
@@ -1190,7 +1147,7 @@ public partial class MainWindow : Window
             _gatewayToken = token;
             UpdateGatewayMonitorStateForTokenStatus(token, tokenRequired: false);
             UpdateGatewayTokenDisplay(token, "Config에서 토큰을 읽어왔습니다. Control UI settings에 붙여 넣으세요.");
-            AppendLog("Gateway token loaded from config.");
+            AppendLog($"[{UserCommandContext}] Gateway token loaded from config.");
             SaveSettings();
             finalStatus = "Gateway token loaded from config.";
             success = true;
@@ -1251,7 +1208,7 @@ public partial class MainWindow : Window
         }
 
         var startArgs = OpenClawWslCommandBuilder.BuildGatewayStartArguments(normalizedDistro, port).ToArray();
-        AppendLog($"Running: wsl.exe {FormatCommandForLog(startArgs)}");
+        AppendWslCommandLog(UserCommandContext, startArgs);
 
         _gatewayCommandTask = RunWslCommandCapturedAsync(
             "wsl.exe",
@@ -1455,7 +1412,7 @@ public partial class MainWindow : Window
         await StopGatewayStreamAsync(token);
         StopGatewayHealthMonitoring();
         var stopArgs = OpenClawWslCommandBuilder.BuildGatewayStopArguments(normalizedDistro).ToArray();
-        AppendLog($"Running: wsl.exe {FormatCommandForLog(stopArgs)}");
+        AppendWslCommandLog(UserCommandContext, stopArgs);
         var stopResult = await RunWslCommandAsync("wsl.exe", stopArgs, token);
         if (stopResult.Canceled)
         {
@@ -2105,6 +2062,11 @@ public partial class MainWindow : Window
         }
 
         Dispatcher.BeginInvoke(() => AppendLog(text));
+    }
+
+    private void AppendWslCommandLog(string context, IReadOnlyList<string> arguments)
+    {
+        AppendLog($"[{context}] Running: wsl.exe {FormatCommandForLog(arguments)}");
     }
 
     private async Task<CommandResult> RunWslCommandAsync(string fileName, IReadOnlyList<string> arguments, CancellationToken token)
